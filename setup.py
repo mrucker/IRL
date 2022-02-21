@@ -1,10 +1,10 @@
 from distutils.core import setup
 
-setup(name='combat',
-      version='0.5',
-      description='Models of Combat Games',
+setup(name='irl',
+      version='0.1',
+      description='IRL Models',
       author='Mark Rucker',
-      packages=['combat'],
+      packages=['irl'],
       python_requires='>=3.8',
       install_requres = [
           'pandas>=1.0',
