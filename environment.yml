@@ -1,4 +1,4 @@
-name: combat
+name: irl
 channels:
   - pytorch
   - defaults
