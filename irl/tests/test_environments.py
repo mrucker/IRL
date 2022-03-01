@@ -5,10 +5,9 @@ from typing import Sequence, cast
 
 import torch
 
-from combat.representations import Policy
-from combat.environments import MassEnvironment
+from irl.models import MassModel, Policy
 
-class TestEnvironment(MassEnvironment):
+class TestModel(MassModel):
     def __init__(self, states: torch.Tensor, actions: torch.Tensor, mass: torch.Tensor, init: torch.Tensor = None):
         super().__init__()
 
@@ -47,7 +46,6 @@ class TestPolicy(Policy):
     def act(self, observation):
         return self._action
 
-
 class Episode_Tests(unittest.TestCase):
     
     def test_from_policy1(self):
@@ -55,7 +53,7 @@ class Episode_Tests(unittest.TestCase):
         actions = torch.tensor([[0],[1]])
         mass    = torch.tensor([[[0,.5,.5],[.5,0,.5],[.5,.5,0]],[[1,0,0],[0,1,0],[0,0,1]]])
         
-        dynamics = TestEnvironment(states, actions, mass, states[0])
+        dynamics = TestModel(states, actions, mass, states[0])
         policy   = TestPolicy(actions[1, :])
 
         actual           = dynamics.make_episode(policy,5)
@@ -70,7 +68,7 @@ class Episode_Tests(unittest.TestCase):
         actions = torch.tensor([[0],[1]])
         mass    = torch.tensor([[[0,.5,.5],[.5,0,.5],[0,0,0]],[[1,0,0],[0,1,0],[0,0,0]]])
 
-        dynamics = TestEnvironment(states, actions, mass, states[2])
+        dynamics = TestModel(states, actions, mass, states[2])
         policy   = TestPolicy(actions[1, :])
 
         with self.assertRaises(Exception) as ex:
@@ -83,7 +81,7 @@ class Episode_Tests(unittest.TestCase):
         actions = torch.tensor([[0],[1]])
         mass    = torch.tensor([[[0,.5,.5],[.5,0,.5],[0,0,0]],[[0,1,0],[0,0,1],[0,0,0]]])
         
-        dynamics = TestEnvironment(states, actions, mass, states[0])
+        dynamics = TestModel(states, actions, mass, states[0])
         policy   = TestPolicy(actions[1, :])
 
         actual           = dynamics.make_episode(policy,5)
@@ -100,7 +98,7 @@ class MassDyamics_Tests(unittest.TestCase):
         actions = torch.tensor([[0],[1]])
         mass    = torch.tensor([[[0,1,0],[1,0,0],[0,0,0]],[[0,0,1],[0,0,1],[0,0,0]]])
         
-        dynamics = TestEnvironment(states, actions, mass, states[0])
+        dynamics = TestModel(states, actions, mass, states[0])
 
         dynamics.reset()
 
@@ -121,7 +119,7 @@ class MassDyamics_Tests(unittest.TestCase):
         actions = torch.tensor([[0],[1]])
         mass    = torch.tensor([[[0,1,0],[1,0,0],[0,0,0]],[[0,0,1],[0,0,1],[0,0,0]]])
 
-        dynamics = TestEnvironment(states, actions, mass, states[0])
+        dynamics = TestModel(states, actions, mass, states[0])
 
         state = dynamics.reset()
         self.assertEqual(torch.tensor([0]), state)

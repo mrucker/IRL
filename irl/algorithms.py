@@ -1,18 +1,16 @@
-import copy
 import collections
 import random
 import time
 import math
 
-from functools import reduce
 from abc import ABC, abstractmethod
 from itertools import chain, count, repeat
-from typing import Sequence, List, Callable, Any, Tuple, Optional, Literal, Union, Dict
+from typing import Sequence, List, Tuple, Optional, Literal, Union, Type
 
 import numpy as np
-from numpy.core.records import get_remaining_size
 import torch
 import gym.spaces
+import stable_baselines3.common.base_class
 
 import sklearn.base
 import sklearn.utils
@@ -26,88 +24,41 @@ import sklearn.neural_network._base
 import sklearn.neural_network._stochastic_optimizers
 import sklearn.kernel_approximation
 
-from combat.representations import (
-    Kernel, Action, Observation, Policy, Reward, Regressor, 
-    SA_Featurizer, Episode, KernelVector, KernelVectorReward, 
-    IdentityFeaturizer
-)
-
-from combat.environments import GymEnvironment, RewardEnvironment, SimEnvironment, MassEnvironment
-from combat.representations import Featurizer
-from combat.visualizations import VideoPlot
-from combat.domains import phase3
+from irl.models import State, Action, Policy, Reward, MassModel, SimModel, Episode
+from irl.kernels import Kernel, KernelVector, KernelReward
+from irl.environments import GymEnvironment
 
 class PolicyLearner(ABC):
+    
     @abstractmethod
-    def learn_policy(self, dynamics, reward: Reward) -> Policy:
+    def learn_policy(self, model, reward: Reward) -> Policy:
         ...
 
 class RewardLearner(ABC):
     @abstractmethod
-    def learn_reward(self, dynamics, episodes: Sequence[Episode]) -> Reward:
+    def learn_reward(self, model, episodes: Sequence[Episode]) -> Reward:
         ...
 
-class RegressionLearner(ABC):
+class Regressor(ABC):
 
     @abstractmethod
-    def learn_regression(self, X, Y) -> Regressor:
+    def fit(self, X, y) -> 'Regressor':
         ...
 
-class SklearnRegressor(RegressionLearner):
-
-    @staticmethod
-    def _sklearn_safe(X):
-        if isinstance(X, torch.Tensor):
-            return X.tolist()
-
-        if isinstance(X, collections.Sequence) and isinstance(X[0], torch.Tensor):
-            return [ x.tolist() for x in X]
-
-        return X
-
-    class SklearnRegressor(Regressor):
-        def __init__(self, sklearn_regressor) -> None:
-            self._sklearn_regressor = sklearn_regressor
-
-        def predict(self, X) -> torch.Tensor:
-
-            X = SklearnRegressor._sklearn_safe(X)
-
-            return torch.Tensor(self._sklearn_regressor.predict(X))
-
-    def __init__(self, sklearn_learner):
-        self._learner = sklearn_learner
-
-    def learn_regression(self, X, Y, sample_weight = None) -> Callable[[Any], torch.Tensor]:
-
-        learner = copy.copy(self._learner)
-
-        X = SklearnRegressor._sklearn_safe(X)
-        Y = SklearnRegressor._sklearn_safe(Y)
-
-        is_weightable = not isinstance(learner, sklearn.neural_network.MLPRegressor)
-
-        if sample_weight is not None and is_weightable:
-            return SklearnRegressor.SklearnRegressor(learner.fit(X,Y, sample_weight=sample_weight))
-        else:
-            return SklearnRegressor.SklearnRegressor(learner.fit(X,Y))
+    @abstractmethod
+    def predict(self, X) -> torch.Tensor:
+        ...
 
 class ValueIteration(PolicyLearner):
 
+    #Classic, but requires a very specific model
+
     class GreedyLookupPolicy(Policy):
-        def __init__(self, Q: torch.Tensor, state_indexes: Dict[Any,int], actions: Sequence[Action]):
-            self._Q           = Q
-            self._state_index = state_indexes
-            self._actions     = actions
+        def __init__(self, Q: torch.Tensor):
+            self._Q = Q
 
-        def act(self, state: Any) -> Action:
-
-            state = tuple(state.tolist()) if isinstance(state, torch.Tensor) else state
-
-            s_i = self._state_index[state]
-            a_i = int(torch.argmax(self._Q[:,s_i,:]))
-
-            return self._actions[a_i]
+        def act(self, state: State, actions: Sequence[Action]) -> Action:
+            return actions[int(torch.argmax(self._Q[:,state,actions]))]
 
     def __init__(self, gamma: float=0.9, epsilon: float=0.1, iterations: int = None) -> None:
         
@@ -117,21 +68,20 @@ class ValueIteration(PolicyLearner):
         self._epsilon    = epsilon
         self._iterations = iterations or float('inf')
 
-    def learn_policy(self, dynamics: MassEnvironment, reward: Reward) -> Policy:
-        S = dynamics.S
-        A = dynamics.A
+    def learn_policy(self, model: MassModel, reward: Reward) -> Policy:
+        S = list(range(len(model.transition_mass[0])))
+        A = list(range(len(model.transition_mass   )))
         R = torch.full((len(A),len(S),1), 0).float()
         Q = torch.full((len(A),len(S),1), 0).float()
-        T = dynamics.transition_tensor
+        T = torch.tensor(model.transition_mass)
 
         for a_i in range(len(A)):
-            R[a_i,:] = torch.tensor(reward.observe(states=list(zip(S,repeat(A[a_i]))))).unsqueeze(1)
+            R[a_i,:] = torch.tensor(reward(list(zip(S, repeat(a_i))))).unsqueeze(1)
 
         S_index = dict(zip(map(tuple,S.tolist()),count())) if isinstance(S, torch.Tensor) else dict(zip(S,count())) #type: ignore
 
         assert R.shape[0] == len(A)
         assert R.shape[1] == len(S)
-        #assert R.shape[1] == 1, "R is expected to be a column vector"
 
         #scale all rewards to length of 1 so that epsilon is meaningful regardless
         #of the given rewards. This scaling has no effect on the optimal policy.
@@ -146,14 +96,8 @@ class ValueIteration(PolicyLearner):
 
         while torch.max(torch.abs(new_V-old_V)) > self._epsilon and iteration < self._iterations:
             iteration += 1
-            Q[:] = R[:] + torch.bmm(T, (self._gamma * new_V).unsqueeze(0).repeat(len(A),1,1))
 
-            #This variation seems to run a tiny bit faster than the torch.bmm method above
-            #however its CPU usage is much much higher. Probably more than it is worth. There
-            #doesn't appear to be any real change in memory usage between the two approaches.
-            # V = (self._gamma * new_V)
-            # for a_i in range(len(A)):
-            #     Q[a_i,:] = R[a_i,:] + T[a_i,] @ V
+            Q[:] = R[:] + torch.bmm(T, (self._gamma * new_V).unsqueeze(0).repeat(len(A),1,1))
 
             old_V, new_V = new_V, torch.max(Q, 0, keepdim=False)[0]
 
@@ -161,69 +105,61 @@ class ValueIteration(PolicyLearner):
 
 class DirectEstimateIteration(PolicyLearner):
 
-    # Add importance weighting
-    # Add better bootstrap support
-    # Add first visit only 
+    #Very similar to MCTS
 
     class NullQ(Regressor):
+
+        def fit(self, X, y) -> 'Regressor':
+            return self 
 
         def predict(self, X) -> torch.Tensor:
             return torch.tensor([0]* len(X)).float()
 
-    class GreedyRegressionPolicy:
-        def __init__(self, Q: Regressor, featurizer: Featurizer, actions: Sequence[Action]) -> None:
+    class GreedyPolicy(Policy):
+        def __init__(self, Q: Regressor) -> None:
             self._Q = Q
-            self._featurizer = featurizer
-            self._actions = actions
 
-        def act(self, state) -> Action:
-            qs = self._Q.predict(self._featurizer.to_features(list(zip(repeat(state), self._actions))))
-            max_indexes = (qs == qs.max()).int().nonzero(as_tuple=True)[0].tolist()
-            return self._actions[random.choice(max_indexes)]
+        def act(self, state: State, actions: Sequence[Action]) -> Action:
+            q_values = torch.tensor(self._Q.predict(list(zip(repeat(state), actions))))
+            argmaxes = (q_values == q_values.max()).int().nonzero(as_tuple=True)[0].tolist()
+            return actions[random.choice(argmaxes)]
 
     def __init__(self, 
-        n_iterations: int,
+        n_iters: int,
         n_episodes: int,
         n_steps: int,
         n_target: Optional[int],
-        regression_learner: RegressionLearner,
-        sa_featurizer: Featurizer = SA_Featurizer(),
+        regressor: Regressor,
         bootstrap: float = 0,
         start_policy: Union[Literal['softmax'], Literal['greedy'], Literal['epsilon']] = 'softmax',
         episode_policy: Union[Literal['softmax'], Literal['greedy'], Literal['epsilon']] = 'greedy',
         previous_samples: Optional[int] = None,
-        terminal_zero: bool = True,
-        importance_sample: bool = False):
+        terminal_zero: bool = True):
 
-        self._regression   = regression_learner
-        self._featurizer   = sa_featurizer
-        self._n_iterations = n_iterations
-        self._n_steps      = n_steps
-        self._n_episodes   = n_episodes
-        self._n_target     = n_target
+        self._regressor  = regressor #The regressor to use when learning our q-function
+        self._n_iters    = n_iters
+        self._n_episodes = n_episodes
+        self._n_steps    = n_steps
+        self._n_target   = n_target
 
-        self._bootstrap = bootstrap
-        self._start_policy = start_policy
-        self._episode_policy = episode_policy
-        self._previous_samples = previous_samples if previous_samples is not None else n_iterations
-        self._terminal_zero = terminal_zero
-        self._importance_sample = importance_sample
+        self._bootstrap        = bootstrap #what percent of the bootstrap value to use (i.e., bootstrap in [0,1])
+        self._start_policy     = start_policy #the policy to use to select the first action in the episodes 
+        self._episode_policy   = episode_policy #the policy to use to select all actions after the first
+        self._previous_samples = previous_samples if previous_samples is not None else n_iters #how many prev to learn from
+        self._terminal_zero    = terminal_zero
 
-    def learn_policy(self, dynamics: SimEnvironment, reward: Reward) -> Policy:
+    def learn_policy(self, dynamics: SimModel, reward: Reward) -> Policy:
 
         times = [0.,0.,0.]
 
-        def q_domain(state, actions):
-            return self._featurizer.to_features(list(zip(repeat(state), actions)))
-
-        def policy(s0, Q, policy_type: Union[Literal['softmax'], Literal['greedy'], Literal['epsilon']]):
+        def policy(s0, Q: Regressor, policy_type: Literal['softmax', 'greedy', 'epsilon']):
             
-            a0s = dynamics.actions()
+            a0s = dynamics.actions(s0)
 
             if policy_type == 'epsilon':
                 return random.choice(a0s) if random.random() < 0.5 else policy(s0, Q, 'greedy')
 
-            qs = Q.predict(q_domain(s0, a0s))
+            qs = Q.predict(list(zip(repeat(s0), a0s)))
 
             if policy_type == 'softmax':
                 es = torch.exp(qs-qs.max())
@@ -236,88 +172,60 @@ class DirectEstimateIteration(PolicyLearner):
 
             raise Exception(f"Unrecognized policy: {policy_type}")
 
-        def bootstrap(S,A,Q,end):
+        def bootstrap(S: Sequence[State], A: Sequence[Action], Q: Regressor, end: int):
             if end >= len(A) or S[end] is None or A[end] is None:
                 return None
             else:
-                return Q.predict(q_domain(S[end],[A[end]]))[0].item()
-
-        def probabilities(trajectory,Q):
-            
-            actions = dynamics.actions()
-
-            probabilities = []
-
-            for state,action,policy_type in trajectory:
-
-                if action is None:
-                    break
-
-                if policy_type == 'epsilon':
-                    epsilon, all_uniform = 0.5, 1/len(actions)
-                    p = epsilon*all_uniform + probabilities([(state,action,'greedy')],Q)
-
-                if policy_type == 'softmax':
-                    qs = Q.predict(q_domain(state, actions))
-                    es = torch.exp(qs-qs.max())
-                    ps = es/sum(es)
-                    p = float(ps[actions.index(action)])
-
-                if policy_type == 'greedy':
-                    qs = Q.predict(q_domain(state, actions))
-                    max_indexes = (qs == qs.max()).int().nonzero(as_tuple=True)[0].tolist()
-                    p = int(actions.index(action) in max_indexes)/len(max_indexes)
-                    
-                probabilities.append(p)
-
-            return probabilities
+                return Q.predict([(S[end],A[end])])[0].item()
 
         Q = DirectEstimateIteration.NullQ()
 
-        iter_episodes: Tuple[List[Observation], List[float], Sequence[Tuple[Observation,Action,str]], Sequence[float]] = []
+        iter_episodes: List[Tuple[List[Tuple[State,Action]], List[float], List[int], List[int], Sequence[Tuple[State,Action,str]]]] = []
 
-        for iteration in range(self._n_iterations):
-            SS: List[List[Observation]] = []
-            AA: List[List[Action]]      = []
-            RR: List[Sequence[float]]   = []
+        for _ in range(self._n_iters):
+            SS: List[List[State]]     = []
+            AA: List[List[Action]]    = []
+            RR: List[Sequence[float]] = []
 
             start_time = time.time()
             for _ in range(self._n_episodes):
 
-                S: List[Observation] = []
-                A: List[Action     ] = []
-                R: List[float      ] = []
+                S: List[State ] = []
+                A: List[Action] = []
+                R: List[float ] = []
 
-                S.append(dynamics.reset())
+                S.append(dynamics.initial_state())
                 A.append(policy(S[-1], Q, self._start_policy))
 
                 for _ in range(1, self._n_steps):
 
-                    s,r,terminal = dynamics.step(A[-1])[0:3]
+                    s = dynamics.next_state(S[-1], A[-1])
+                    r = reward((S[-1],A[-1]))[0]
 
                     R.append(r)
                     S.append(s)
 
-                    if terminal and self._terminal_zero:
+                    if dynamics.is_terminal(s) and self._terminal_zero:
                         A.extend([None]*(self._n_steps-len(A)  ))
                         S.extend([None]*(self._n_steps-len(S)  ))
                         R.extend([0]   *(self._n_steps-len(R)-1))
 
-                    if terminal and not self._terminal_zero:
+                    if dynamics.is_terminal(s) and not self._terminal_zero:
                         A.append(None)
 
-                    if terminal:
+                    if dynamics.is_terminal(s):
                         break
 
                     A.append(policy(s, Q, self._episode_policy))
 
                 if reward:
-                    rs = list(reward.observe(states=[s for s,a in zip(S,A) if s is not None and a is not None]))
+                    rs = reward([(s,a) for s,a in zip(S,A) if s is not None and a is not None])
                     R  = rs[0:len(R)] + [None] * max(len(R) - len(rs), 0)
 
                 SS.append(S)
                 AA.append(A)
                 RR.append(R)
+
             times[0] += time.time()-start_time
 
             start_time = time.time()
@@ -342,8 +250,8 @@ class DirectEstimateIteration(PolicyLearner):
                     if S[start] is None or A[start] is None:
                         continue
 
-                    example = q_domain(S[start],[A[start]])[0]
-                    value  = float(sum(R[start:end])) / (end-start)
+                    example = (S[start],A[start])
+                    value   = float(sum(R[start:end])) / (end-start)
 
                     if self._bootstrap > 0 and bootstrap(S, A, Q, end) is not None: 
                         value = value + (self._bootstrap)*(bootstrap(S, A, Q, end)-value)
@@ -351,8 +259,7 @@ class DirectEstimateIteration(PolicyLearner):
                     examples.append(example)
                     labels.append(float(value))
 
-                probs = probabilities(SAP,Q) if self._importance_sample else []
-                episodes.append((examples, labels, starts, ends, SAP, probs))
+                episodes.append((examples, labels, starts, ends, SAP))
             times[1] += time.time()-start_time
 
             start_time = time.time()
@@ -360,72 +267,54 @@ class DirectEstimateIteration(PolicyLearner):
 
             training_examples = []
             training_labels   = []
-            training_weights  = [] if self._importance_sample else None
 
-            for examples, labels, starts, ends, SAP, old_probs in chain.from_iterable(iter_episodes[-(self._previous_samples+1):]):
-
-                prod = lambda xs: reduce(lambda x,y: x*y, xs)
-                
-                if self._importance_sample:
-                    new_probs = probabilities(SAP,Q)
+            for examples, labels, starts, ends, SAP in chain.from_iterable(iter_episodes[-(self._previous_samples+1):]):
 
                 for example, label, start, end in zip(examples, labels, starts, ends):
                     training_examples.append(example)
                     training_labels.append(label)
 
-                    if self._importance_sample:
-                        p = prod(new_probs[start:end])/prod(old_probs[start:end])
-                        training_weights.append(p)
-
-            Q = self._regression.learn_regression(training_examples, training_labels, training_weights)
+            Q = self._regressor.fit(training_examples, training_labels)
             times[2] += time.time()-start_time
 
-            #print(times)
-
-        return DirectEstimateIteration.GreedyRegressionPolicy(Q, self._featurizer, dynamics.actions())
+        return DirectEstimateIteration.GreedyPolicy(Q)
 
 class StableBaseline(PolicyLearner):
     
-    class StableBaselinePolicy:
-        def __init__(self, policy, observer: Featurizer = None) -> None:
+    """A Facade to allow all StableBasline algorithms to be used.
+    https://stable-baselines3.readthedocs.io/en/master/guide/algos.html
+    """
+
+    class StableBaselinePolicy(Policy):
+        def __init__(self, policy: stable_baselines3.common.base_class.BaseAlgorithm) -> None:
             self._policy = policy
-            self._observer = observer
 
-        def act(self, s) -> Action:
-
-            if self._observer:
-                return self._policy.predict(self._observer.to_features([s])[0], deterministic=True)[0]
-            else:
-                return self._policy.predict(s, deterministic=True)[0]
+        def __call__(self, state: State, actions: Sequence[Action]) -> Action:
+            return self._policy.predict(state, deterministic=True)[0]
 
     def __init__(self, 
-        algorithm, 
+        algorithm: Type[stable_baselines3.common.base_class.BaseAlgorithm], 
         steps: int, 
         policy:str="MlpPolicy", 
-        observer: Tuple[gym.spaces.Space,Featurizer] = None, **kwargs):
+        space: gym.spaces.Space = None, **kwargs):
 
         self._alg      = algorithm
         self._stp      = steps
         self._policy   = policy
-        self._observer = observer
+        self._space    = space
         self._kwargs   = kwargs
 
-    def learn_policy(self, dynamics: SimEnvironment, reward: Reward) -> Policy:
+    def learn_policy(self, dynamics: SimModel, reward: Reward = None) -> Policy:
 
-        if reward:
-            dynamics = RewardEnvironment(dynamics, reward)
-
-        if self._observer:
-            dynamics = GymEnvironment(dynamics, self._observer[0], self._observer[1])
+        dynamics = GymEnvironment(dynamics, reward, self._space)
 
         policy = self._alg(self._policy, dynamics, verbose=0, **self._kwargs).learn(self._stp)
 
-        if self._observer:
-            return StableBaseline.StableBaselinePolicy(policy, self._observer[1])
-        else:
-            return StableBaseline.StableBaselinePolicy(policy)
+        return StableBaseline.StableBaselinePolicy(policy)
 
 class KernelProjection(RewardLearner):
+
+    """Kernel extension to Abeel and Ngs Apprenticeship Learning via IRL"""
 
     def __init__(self,
         policy_learner: PolicyLearner,
@@ -442,7 +331,7 @@ class KernelProjection(RewardLearner):
         self._is_verbose     = is_verbose
         self._max_iterations = max_iterations
 
-    def learn_reward(self, dynamics: SimEnvironment, expert_episodes: Sequence[Episode]) -> Tuple[Reward, KernelVector, KernelVector]: #type:ignore
+    def learn_reward(self, model: SimModel, expert_episodes: Sequence[Episode]) -> Tuple[Reward, KernelVector, KernelVector]: #type:ignore
 
         fe_length = min([ len(e.actions) for e in expert_episodes])
 
@@ -456,9 +345,9 @@ class KernelProjection(RewardLearner):
 
         start             = time.time()
         alpha             = KernelVector(self._kernel, torch.randn((len(expert_visits))).tolist(), expert_visits.items)
-        reward            = KernelVectorReward(alpha)
-        reward_policy     = self._policy_learner.learn_policy(dynamics, reward)
-        reward_episodes   = [ dynamics.make_episode(reward_policy,fe_length) for _ in range(100) ]
+        reward            = KernelReward(alpha)
+        reward_policy     = self._policy_learner.learn_policy(model, reward)
+        reward_episodes   = [ Episode.generate(model,reward_policy,fe_length) for _ in range(100) ]
         reward_visits     = self.expected_visitation_in_kernel_space(reward_episodes)
         new_convex_visits = reward_visits
 
@@ -467,7 +356,7 @@ class KernelProjection(RewardLearner):
         rewards_visits.append(reward_visits)
 
         i = 1
-        t = (expert_visits - new_convex_visits).norm()
+        t = math.sqrt((expert_visits - new_convex_visits) @ (expert_visits - new_convex_visits))
         j = float("inf")
 
         if self._is_verbose:
@@ -479,9 +368,9 @@ class KernelProjection(RewardLearner):
 
             start           = time.time()
             alpha           = expert_visits - old_convex_visits
-            reward          = KernelVectorReward(alpha)
-            reward_policy   = self._policy_learner.learn_policy(dynamics, reward)
-            reward_episodes = [ dynamics.make_episode(reward_policy,fe_length) for _ in range(100) ]
+            reward          = KernelReward(alpha)
+            reward_policy   = self._policy_learner.learn_policy(model, reward)
+            reward_episodes = [ Episode.generate(model,reward_policy,fe_length) for _ in range(100) ]
             reward_visits   = self.expected_visitation_in_kernel_space(reward_episodes)
 
             alphas.append(alpha)
@@ -528,19 +417,14 @@ class KernelProjection(RewardLearner):
 
 class CascadedSupervised(RewardLearner):
 
+    """An implementation of http://www.lifl.fr/~pietquin/pdf/ECML_2013_EKBPMGOP.pdf."""
+
     class SklearnReward(Reward):
 
-        def __init__(self, sklearn_model, featurizer: Featurizer) -> None:
+        def __init__(self, sklearn_model) -> None:
             self._sklearn_model = sklearn_model
-            self._featurizer    = featurizer
 
-        def observe(self, state: Observation = None, states:Sequence[Observation] = None) -> Union[Sequence[float], float]:
-            
-            if state is not None: 
-                state = self._featurizer.to_features([state])
-
-            if states is not None:
-                states = self._featurizer.to_features(states)
+        def __call__(self, states:Sequence[Tuple[State,Action]] = None) -> Sequence[float]:
 
             if isinstance(state, torch.Tensor):
                 state = state.tolist()
@@ -558,34 +442,26 @@ class CascadedSupervised(RewardLearner):
 
     class SklearnPolicy(Policy):
 
-        def __init__(self, score_based_classifier, actions, featurizer: Featurizer) -> None:
-            self._model      = score_based_classifier
-            self._featurizer = featurizer
-            self._actions    = actions
+        def __init__(self, score_based_classifier) -> None:
+            self._model = score_based_classifier
 
-        def act(self, observation) -> Action:
-            scores = torch.tensor([self._model(self._featurizer.to_features([observation])[0], a) for a in self._actions])
-
-            return self._actions[scores.argmax()]
+        def act(self, state: State, actions: Sequence[Action]) -> Action:
+            self._model.predict([])
+            scores = torch.tensor([self._model(state, a) for a in actions])
+            return actions[scores.argmax()]
 
     class RandomPolicy(Policy):
         def __init__(self, actions) -> None:
             self._actions = actions
 
-        def act(self, observation) -> Action:
+        def act(self, state: State, actions: Sequence[Action]) -> Action:
             return random.choice(self._actions)
 
-    def __init__(self, featurizer: Featurizer = IdentityFeaturizer()) -> None:
-        self._featurizer = featurizer
-
-    """An implementation of http://www.lifl.fr/~pietquin/pdf/ECML_2013_EKBPMGOP.pdf."""
-
-    def learn_reward(self, dynamics: SimEnvironment, expert_episodes: Sequence[Episode]) -> Reward: #type:ignore
+    def learn_reward(self, dynamics: SimModel, expert_episodes: Sequence[Episode]) -> Reward: #type:ignore
 
         actions = dynamics.actions()
 
-        aug = [ dynamics.make_episode(CascadedSupervised.RandomPolicy(actions)) for _ in range(int(len(expert_episodes)/2))]
-        aug = []
+        aug = [ Episode.generate(dynamics, CascadedSupervised.RandomPolicy(actions)) for _ in range(int(len(expert_episodes)/2))]
 
         score_based_classifier      = self._rf_score_based_classifier(expert_episodes, actions)        
         learned_reward, reward_coef = self._sgd_reward_function(expert_episodes+aug, actions, score_based_classifier)
@@ -593,15 +469,13 @@ class CascadedSupervised(RewardLearner):
 
         return learned_reward, reward_coef, expert_feature_expectation
 
-    def _sgd_score_based_classifier(self, expert_episodes, actions):
+    def _sgd_score_based_classifier(self, expert_episodes: Sequence[Episode], actions: Sequence[Action]):
 
         model = sklearn.linear_model.SGDClassifier(loss='log')
 
         for episode in expert_episodes:
 
-            featureized_states = self._featurizer.to_features(episode.states)
-
-            for state,action in zip(featureized_states, episode.actions):
+            for state,action in zip(episode.states, episode.actions):
 
                 if isinstance(state, torch.Tensor):
                     state = state.tolist()
@@ -616,16 +490,14 @@ class CascadedSupervised(RewardLearner):
 
         return lambda x,a: model.predict_proba([x])[0,actions.index(a)]
 
-    def _rf_score_based_classifier(self, expert_episodes, actions):
+    def _rf_score_based_classifier(self, expert_episodes: Sequence[Episode], actions: Sequence[Action]):
 
         X = []
         Y = []
 
         for episode in expert_episodes:
 
-            featureized_states = self._featurizer.to_features(episode.states)
-
-            for state,action in zip(featureized_states, episode.actions):
+            for state,action in zip(episode.states, episode.actions):
                 
                 if isinstance(state, torch.Tensor):
                     state = state.tolist()
@@ -639,10 +511,10 @@ class CascadedSupervised(RewardLearner):
         model = sklearn.ensemble.RandomForestClassifier(n_estimators=300,max_depth=2).fit(X,Y)
         return lambda x,a,m=model: 0 if a not in m.classes_ else m.predict_proba([x])[0,m.classes_.tolist().index(a)]
 
-    def _sgd_reward_function(self, expert_episodes, actions, score_based_classifier):
+    def _sgd_reward_function(self, expert_episodes: Sequence[Episode], actions: Sequence[Action], score_based_classifier):
         reward_regressor = sklearn.linear_model.SGDRegressor()
 
-        pi_c = CascadedSupervised.SklearnPolicy(score_based_classifier, actions, IdentityFeaturizer())
+        pi_c = CascadedSupervised.SklearnPolicy(score_based_classifier)
 
         for episode in chain(expert_episodes):
             
@@ -652,9 +524,7 @@ class CascadedSupervised(RewardLearner):
             regression_X = []
             regression_Y = []
 
-            featurized_states = self._featurizer.to_features(episode.states)
-
-            for state,action in zip(featurized_states, episode.actions):
+            for state,action in zip(episode.states, episode.actions):
                 
                 if isinstance(state, torch.Tensor):
                     state = state.tolist()
@@ -676,21 +546,19 @@ class CascadedSupervised(RewardLearner):
 
         return CascadedSupervised.SklearnReward(reward_regressor, self._featurizer), reward_regressor.coef_.tolist()
 
-    def _expert_feature_expectation(self, expert_episodes):
+    def _expert_feature_expectation(self, expert_episodes: Sequence[Episode]):
 
         expert_feature_sum = None
         expert_state_count = None
 
         for episode in expert_episodes:
             
-            featureized_states = self._featurizer.to_features(episode.states)
-
             if expert_feature_sum is None:
-                expert_state_count = len(featureized_states)
-                expert_feature_sum = featureized_states.sum(dim=0)
+                expert_state_count = len(episode.states)
+                expert_feature_sum = episode.states.sum(dim=0)
             else:
-                expert_state_count += len(featureized_states)
-                expert_feature_sum += featureized_states.sum(dim=0)
+                expert_state_count += len(episode.states)
+                expert_feature_sum += episode.states.sum(dim=0)
         
         return (expert_feature_sum / expert_state_count).tolist()
 
@@ -715,40 +583,17 @@ class MaxCausalEnt(RewardLearner):
 
     class ThetaReward(Reward):
 
-        def __init__(self, theta: np.ndarray, r_featurizer: Featurizer) -> None:
-            self._theta        = np.array(theta).squeeze()
-            self._r_featurizer = r_featurizer
+        def __init__(self, theta: np.ndarray) -> None:
+            self._theta = np.array(theta).squeeze()
 
-        def observe(self, state: Observation = None, states:Sequence[Observation] = None) -> Union[Sequence[float], float]:
-            
-            if state is not None: 
-                state = self._r_featurizer.to_features([state])
+        def observe(self, states:Sequence[Tuple[State,Action]] = None) -> Union[Sequence[float], float]:
+            return np.array([ s for s,a in states ]) @ self._theta
 
-            if states is not None:
-                states = self._r_featurizer.to_features(states)
+    def __init__(self, n_ephochs:int=15) -> None:
+        self._n_epochs = n_ephochs
+        self._skip_n   = 0
 
-            if isinstance(state, torch.Tensor):
-                state = state.tolist()
-
-            if isinstance(states, torch.Tensor):
-                states = states.tolist()
-
-            if state is not None and not isinstance(state, collections.Sequence):
-                state = [[state]]
-
-            if states is not None and not isinstance(states[0], collections.Sequence):
-                states = [[state] for state in states]
-
-            return np.array(state) @ self._theta if states is None else np.array(states) @ self._theta
-
-    def __init__(self, r_featurizer: Featurizer, q_featurizer: Featurizer, n_ephochs:int=15) -> None:
-        self._r_featurizer = r_featurizer
-        self._q_featurizer = q_featurizer
-        self._n_epochs     = n_ephochs
-
-        self._skip_n = 0
-
-    def learn_reward(self, dynamics: SimEnvironment, expert_episodes: Sequence[Episode]) -> Reward: #type:ignore
+    def learn_reward(self, dynamics: SimModel, expert_episodes: Sequence[Episode]) -> Reward: #type:ignore
 
         r_t0s0a0_features = self._r_featurizer.to_features([(expert_episodes[0].states[0], expert_episodes[0].actions[0])])
         q_t0s0a0_features = self._q_featurizer.to_features([(expert_episodes[0].states[0], expert_episodes[0].actions[0])])
