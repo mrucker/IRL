@@ -41,6 +41,14 @@ class SimModel(ABC):
 
 class MassModel(SimModel, ABC):
 
+    @abstractmethod
+    def states(self) -> Sequence[State]:
+        ...
+
+    @abstractmethod
+    def actions(self, _: State) -> Sequence[Action]:
+        ...
+
     @property
     @abstractmethod
     def initial_mass(self) -> Sequence[float]:
@@ -52,16 +60,19 @@ class MassModel(SimModel, ABC):
         ...
 
     def initial_state(self) -> State:
-        return random.choice(list(range(len(self.initial_mass))), self.initial_mass)
-
-    def actions(self, state: State) -> Sequence[Action]:
-        return list(range(len(self.transition_mass)))
+        return random.choices(self.states(),self.initial_mass, k=1)[0]
 
     def next_state(self, state: State, action: Action) -> State:
-        return random.choice(list(range(len(self.initial_mass))), self.transition_mass[action][state])
+        if self.is_terminal(state): raise Exception("A transition was requested for a terminal state")
+        return random.choices(self.states(), self.transition_mass[action][state])[0]
 
     def post_state(self, state: State , action: Action) -> Post_State:
         return (state,action)
+
+    def is_terminal(self, state) -> bool:
+        state_index = self.states().index(state)
+
+        return 0 == sum([ sum(t[state_index]) for t in self.transition_mass ])
 
 class Episode:
 
@@ -72,8 +83,9 @@ class Episode:
         actions = []
 
         for _ in range(length-1):
-            actions.append(policy(states[-1]))
-            states.append(model.next_state(model.post_state(states[-1], actions[-1])))
+            actions.append(policy(states[-1], model.actions(states[-1])))
+            states.append(model.next_state(states[-1], actions[-1]))
+            if model.is_terminal(states[-1]): break
 
         return Episode(states,actions) 
 

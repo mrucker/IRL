@@ -1,9 +1,9 @@
 from irl.kernels import Kernel, GaussianKernel
-from irl.domains.mindtrails.models import MindtrailModel
+from irl.domains.mindtrails.models import Model
 
-class MindtrailsKernel(Kernel):
+class Kernel(Kernel):
 
-    def __init__(self, model: MindtrailModel) -> None:
+    def __init__(self, model: Model) -> None:
         self._model = model
 
     def __call__(self, items1, items2):

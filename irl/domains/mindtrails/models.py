@@ -1,4 +1,4 @@
 from irl.models import SimModel
 
-class MindtrailModel(SimModel):
+class Model(SimModel):
     pass
