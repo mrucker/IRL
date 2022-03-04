@@ -9,12 +9,6 @@ class TestModel(MassModel):
     def __init__(self, mass):
         self._mass = mass
 
-    def states(self) -> Sequence[int]:
-        return [0,1,2]
-
-    def actions(self,_) -> Sequence[int]:
-        return [0,1]
-
     @property
     def initial_mass(self) -> Sequence[float]:
         return [1,0,0]

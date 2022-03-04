@@ -2,10 +2,7 @@ import math
 
 from abc import ABC, abstractmethod
 from operator import mul
-from itertools import combinations
 from typing import Any, Sequence, Tuple, Iterator, List
-
-from irl.models import Reward
 
 class Kernel(ABC):
 
@@ -76,6 +73,10 @@ class KernelVector:
         self.items  = [ i[k] for k in keys if c[k] != 0]
         self.coefs  = [ c[k] for k in keys if c[k] != 0]
 
+    def norm(self) -> float:
+        
+        return math.sqrt(self @ self)
+
     def _equal_groups(self, kernel, check_items, base_groups=[]) -> Sequence[int]:
 
         equal_groups = list(base_groups)
@@ -129,15 +130,3 @@ class KernelVector:
         else:
             K = self.kernel(self.items, other)
             return [ sum([ self.coefs[i]*K[i][j] for i in range(len(self)) ]) for j in range(len(other)) ]
-
-class KernelReward(Reward):
-
-    def __init__(self, alpha: 'KernelVector') -> None:
-        self._alpha  = alpha
-        self._reward = lambda s: sum([ c*self._alpha.kernel(i,s) for c,i in self._alpha ])
-
-    def observe(self, state = None, states = None):       
-        if state:
-            return self._reward(state)
-        else:
-            return list(map(self._reward,states))

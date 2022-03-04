@@ -3,7 +3,6 @@ from typing import Sequence, Tuple
 from irl.models import SimModel, State, Action
 
 class Featurizer(ABC):
-
     @abstractmethod
     def fit_transform(self, X: Sequence[Tuple[State,Action]], y = None) -> Sequence[State]:
         ...

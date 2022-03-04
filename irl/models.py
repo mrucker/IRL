@@ -15,7 +15,7 @@ class Policy(ABC):
 
 class Reward(ABC):
     @abstractmethod
-    def __call__(self, states: Sequence[Tuple[State,Action]]) -> Sequence[float]:
+    def __call__(self, states_actions: Sequence[Tuple[State,Action]]) -> Sequence[float]:
         ...
 
 class SimModel(ABC):
@@ -41,18 +41,15 @@ class SimModel(ABC):
 
 class MassModel(SimModel, ABC):
 
-    @abstractmethod
     def states(self) -> Sequence[State]:
-        ...
+        return list(range(len(self.transition_mass[0])))
 
-    @abstractmethod
-    def actions(self, _: State) -> Sequence[Action]:
-        ...
+    def actions(self, _: State=None) -> Sequence[Action]:
+        return list(range(len(self.transition_mass)))
 
     @property
-    @abstractmethod
     def initial_mass(self) -> Sequence[float]:
-        ...
+        return [1/len(self.states())]*len(self.states())
 
     @property
     @abstractmethod
