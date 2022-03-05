@@ -4,8 +4,11 @@ from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestClassifier
 
 from irl.kernels import GaussianKernel
-from irl.models import MassModel, Reward, Episode
-from irl.algorithms import ValueIteration, DirectEstimateIteration, KernelProjection, CascadedSupervised, MaxCausalEnt
+from irl.models import MassModel, Reward, Episode, GymModel
+from irl.algorithms import KernelProjection, CascadedSupervised, MaxCausalEnt
+from irl.algorithms import ValueIteration, DirectEstimateIteration, StableBaseline
+
+from gym.spaces import Discrete
 
 class TestReward1(Reward):
     def __call__(self, state_actions):
@@ -104,7 +107,6 @@ class MaxCausalEntApprximation_Tests(unittest.TestCase):
     def test_simple_model1(self):
         dynamics    = SimpleDynamics([[[0,.5,.5],[.5,0,.5],[.5,.5,0]],[[1,0,0],[0,1,0],[0,0,1]]]) 
         true_reward = TestReward2()
-
         
         policy_learner = ValueIteration(0.99,0.01)
         reward_learner = MaxCausalEnt()
@@ -117,3 +119,14 @@ class MaxCausalEntApprximation_Tests(unittest.TestCase):
         self.assertEqual(learned_policy(0, [0,1]), optimal_policy(0, [0,1]))
         self.assertEqual(learned_policy(1, [0,1]), optimal_policy(1, [0,1]))
         self.assertEqual(learned_policy(2, [0,1]), optimal_policy(2, [0,1]))
+
+class StableBaselines_Tests(unittest.TestCase):
+
+    def test_simple_model1(self):
+        mass    = [[[1,0,0],[1,0,0],[0,1,0]],[[0,1,0],[0,0,1],[1,0,0]]]
+        model   = GymModel(SimpleDynamics(mass), Discrete(3))
+        policy  = StableBaseline("A2C", 1000, 5).learn_policy(model,TestReward1())
+
+        self.assertEqual(0, policy(0, [0,1]))
+        self.assertEqual(0, policy(1, [0,1]))
+        self.assertEqual(1, policy(2, [0,1]))

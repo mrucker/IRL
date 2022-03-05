@@ -1,8 +1,8 @@
 import gym
 import gym.spaces
 
-from typing import overload, Sequence, Tuple, Optional, Any
-from irl.models import SimModel, State, Reward
+from typing import overload, Tuple, Optional, Any
+from irl.models import GymModel, State, Reward
 
 class GymEnvironment(gym.Env):
 
@@ -13,31 +13,33 @@ class GymEnvironment(gym.Env):
     def __init__(self, environment: gym.Env, reward: Reward = None) -> None: ...
 
     @overload
-    def __init__(self, environment: SimModel, reward: Reward, observation_space: gym.spaces.Space) -> None: ...
+    def __init__(self, environment: GymModel, reward: Reward) -> None: ...
 
-    def __init__(self, environment, reward: Reward = None, observation_space: gym.spaces.Space = None):
+    def __init__(self, environment, reward: Reward = None):
 
         if isinstance(environment,str):
             environment = gym.make(environment)
 
-        if isinstance(environment, SimModel):
-            self._environment      = environment
-            self._actions          = environment.actions()
-            self._reward           = reward
-            self.action_space      = gym.spaces.Discrete(len(self._actions))
-            self.observation_space = observation_space
+        if isinstance(environment, GymModel):
+            self._environment       = environment
+            self._actions           = environment.actions(None)
+            self._reward            = reward
+            self._action_space      = gym.spaces.Discrete(len(self._actions))
+            self._observation_space = environment.observation_space
 
         if isinstance(environment, gym.Env):
             self._environment      = environment
             self._reward           = reward
-            self.action_space      = environment.action_space
-            self.observation_space = environment.observation_space
+            self._action_space      = environment.action_space
+            self._observation_space = environment.observation_space
 
-    def actions(self) -> Sequence[int]:
-        if isinstance(self._environment, gym.Env):
-            return list(range(self._environment.action_space.n))
-        else:
-            return self._environment.actions()
+    @property
+    def action_space(self) -> gym.spaces.Space:
+        return self._action_space
+
+    @property
+    def observation_space(self) -> gym.spaces.Space:
+        return self._observation_space
 
     def reset(self) -> State:
         if isinstance(self._environment, gym.Env):
@@ -53,7 +55,7 @@ class GymEnvironment(gym.Env):
             return state, reward, terminal, info
         else:
             state       = self._environment.next_state(self._state, self._actions[action])
-            reward      = self._reward([(self._state, self._actions[action])])
+            reward      = self._reward([(self._state, self._actions[action])])[0]
             terminal    = self._environment.is_terminal(state)
             self._state = state    
             return state, reward, terminal, {}

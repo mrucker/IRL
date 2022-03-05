@@ -4,13 +4,14 @@ import time
 import math
 
 from abc import ABC, abstractmethod
-from itertools import chain, count, repeat, zip_longest
+from itertools import chain, repeat
 from typing import Sequence, List, Tuple, Optional, Literal, Union, Type
 
 import numpy as np
 import torch
-import gym.spaces
-import stable_baselines3.common.base_class
+
+from stable_baselines3 import PPO, A2C
+from stable_baselines3.common.env_util import make_vec_env
 
 import sklearn.base
 import sklearn.utils
@@ -24,7 +25,7 @@ import sklearn.neural_network._base
 import sklearn.neural_network._stochastic_optimizers
 import sklearn.kernel_approximation
 
-from irl.models import State, Action, Policy, Reward, MassModel, SimModel, Episode
+from irl.models import State, Action, Policy, Reward, MassModel, SimModel, GymModel, Episode
 from irl.kernels import Kernel, KernelVector
 from irl.environments import GymEnvironment
 
@@ -279,34 +280,30 @@ class DirectEstimateIteration(PolicyLearner):
 
 class StableBaseline(PolicyLearner):
     
-    """A Facade to allow all StableBasline algorithms to be used.
+    """A facade to provide StableBasline algorithm compatibility.
     https://stable-baselines3.readthedocs.io/en/master/guide/algos.html
     """
 
     class StableBaselinePolicy(Policy):
-        def __init__(self, policy: stable_baselines3.common.base_class.BaseAlgorithm) -> None:
+        def __init__(self, policy: Union[PPO, A2C]) -> None:
             self._policy = policy
 
         def __call__(self, state: State, actions: Sequence[Action]) -> Action:
             return self._policy.predict(state, deterministic=True)[0]
 
-    def __init__(self, 
-        algorithm: Type[stable_baselines3.common.base_class.BaseAlgorithm], 
-        steps: int, 
-        policy:str="MlpPolicy", 
-        space: gym.spaces.Space = None, **kwargs):
+    def __init__(self, algorithm: Literal["A2C", "PPO"], n_envs:int, n_steps:int, policy:str="MlpPolicy", **kwargs):
 
-        self._alg      = algorithm
-        self._stp      = steps
-        self._policy   = policy
-        self._space    = space
-        self._kwargs   = kwargs
+        self._algorithm = algorithm
+        self._n_envs    = n_envs
+        self._n_steps   = n_steps
+        self._policy    = policy
+        self._kwargs    = kwargs
 
-    def learn_policy(self, dynamics: SimModel, reward: Reward = None) -> Policy:
+    def learn_policy(self, model: GymModel, reward: Reward) -> Policy:
 
-        dynamics = GymEnvironment(dynamics, reward, self._space)
-
-        policy = self._alg(self._policy, dynamics, verbose=0, **self._kwargs).learn(self._stp)
+        algorithm   = A2C if self._algorithm == "A2C" else PPO
+        environment = make_vec_env(lambda: GymEnvironment(model, reward), n_envs=self._n_envs)
+        policy      = algorithm(self._policy, environment, verbose=0, **self._kwargs).learn(self._n_steps)
 
         return StableBaseline.StableBaselinePolicy(policy)
 
@@ -500,6 +497,8 @@ class CascadedSupervised(RewardLearner):
         return self._regressor.fit(X,Y)
 
 class MaxCausalEnt(RewardLearner):
+
+    """https://www.cs.cmu.edu/~kkitani/pdf/HFKB-AAAI15.pdf"""
 
     class ApproximatePolicy(Policy):
 

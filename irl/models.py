@@ -1,6 +1,7 @@
 import random
 from abc import abstractmethod, ABC
 from typing import Sequence, Any, Tuple
+from gym.spaces import Space
 
 IsTerminal = bool
 
@@ -70,6 +71,31 @@ class MassModel(SimModel, ABC):
         state_index = self.states().index(state)
 
         return 0 == sum([ sum(t[state_index]) for t in self.transition_mass ])
+
+class GymModel(SimModel):
+    
+    def __init__(self, model: SimModel, observation_space: Space) -> None:
+        self._model = model
+        self._observation_space = observation_space
+
+    @property
+    def observation_space(self) -> Space:
+        return self._observation_space
+
+    def actions(self, state: State) -> Sequence[Action]:
+        return self._model.actions(state)
+
+    def next_state(self, state: State, action: Action) -> State:
+        return self._model.next_state(state, action)
+
+    def post_state(self, state: State, action: Action) -> Post_State:
+        return self._model.post_state(state, action)
+
+    def is_terminal(self, state: State) -> bool:
+        return self._model.is_terminal(state)
+
+    def initial_state(self) -> State:
+        return self._model.initial_state()
 
 class Episode:
 
