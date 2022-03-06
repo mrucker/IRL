@@ -1,8 +1,33 @@
 import gym
 import gym.spaces
 
-from typing import overload, Tuple, Optional, Any
-from irl.models import GymModel, State, Reward
+from typing import overload, Tuple, Optional, Any, Sequence
+from irl.models import SimModel, State, Reward, Action, State, Post_State
+
+class GymModel(SimModel):
+    
+    def __init__(self, model: SimModel, observation_space: gym.spaces.Space) -> None:
+        self._model = model
+        self._observation_space = observation_space
+
+    @property
+    def observation_space(self) -> gym.spaces.Space:
+        return self._observation_space
+
+    def actions(self, state: State) -> Sequence[Action]:
+        return self._model.actions(state)
+
+    def next_state(self, state: State, action: Action) -> State:
+        return self._model.next_state(state, action)
+
+    def post_state(self, state: State, action: Action) -> Post_State:
+        return self._model.post_state(state, action)
+
+    def is_terminal(self, state: State) -> bool:
+        return self._model.is_terminal(state)
+
+    def initial_state(self) -> State:
+        return self._model.initial_state()
 
 class GymEnvironment(gym.Env):
 

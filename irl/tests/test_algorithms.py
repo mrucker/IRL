@@ -4,7 +4,8 @@ from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestClassifier
 
 from irl.kernels import GaussianKernel
-from irl.models import MassModel, Reward, Episode, GymModel
+from irl.models import MassModel, Reward, Episode
+from irl.gym import GymModel
 from irl.algorithms import KernelProjection, CascadedSupervised, MaxCausalEnt
 from irl.algorithms import ValueIteration, DirectEstimateIteration, StableBaseline
 

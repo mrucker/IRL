@@ -14,9 +14,9 @@ from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.env_util import make_vec_env
 from sklearn.linear_model import LinearRegression
 
-from irl.models import State, Action, Policy, Reward, MassModel, SimModel, GymModel, Episode
+from irl.models import State, Action, Policy, Reward, MassModel, SimModel, Episode
 from irl.kernels import Kernel, KernelVector
-from irl.environments import GymEnvironment
+from irl.gym import GymModel, GymEnvironment
 
 class PolicyLearner(ABC):
     
