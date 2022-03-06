@@ -5,25 +5,14 @@ import math
 
 from abc import ABC, abstractmethod
 from itertools import chain, repeat
-from typing import Sequence, List, Tuple, Optional, Literal, Union, Type
+from typing import Sequence, List, Tuple, Optional, Literal, Union
 
 import numpy as np
 import torch
 
 from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.env_util import make_vec_env
-
-import sklearn.base
-import sklearn.utils
-import sklearn.exceptions
-import sklearn.model_selection
-import sklearn.ensemble
-import sklearn.linear_model
-import sklearn.utils.extmath
-import sklearn.neural_network
-import sklearn.neural_network._base
-import sklearn.neural_network._stochastic_optimizers
-import sklearn.kernel_approximation
+from sklearn.linear_model import LinearRegression
 
 from irl.models import State, Action, Policy, Reward, MassModel, SimModel, GymModel, Episode
 from irl.kernels import Kernel, KernelVector
@@ -500,252 +489,75 @@ class MaxCausalEnt(RewardLearner):
 
     """https://www.cs.cmu.edu/~kkitani/pdf/HFKB-AAAI15.pdf"""
 
-    class ApproximatePolicy(Policy):
+    class MaxEntPolicy(Policy):
 
-        def __init__(self, actions, Q):
-            self._actions = actions
-            self._Q       = Q
+        def __init__(self, Q: Regressor, dynamics: SimModel):
+            self._Q = Q
+            self._D = dynamics
 
-        def act(self, state) -> Action:
-            
-            qs = self._Q([(state,action) for action in self._actions])
-            Z  = self._soft_max(qs)
-
-            return random.choices(self._actions, weights=np.exp(qs-Z))[0]
-
-        def _soft_max(self, xs: Sequence[float]) -> float:
-            max_x = max(xs)
-            return max_x + np.log(sum(np.exp(xs-max_x)))
+        def __call__(self, state, actions) -> Action:
+            qs = self._Q.predict([self._D.post_state(state,action) for action in actions])
+            return random.choices(actions, weights=np.exp(qs-sum(qs)))[0]
 
     class ThetaReward(Reward):
 
-        def __init__(self, theta: np.ndarray) -> None:
-            self._theta = np.array(theta).squeeze()
+        def __init__(self, theta: Sequence[float], dynamics: SimModel) -> None:
+            self._theta = torch.tensor(theta).squeeze()
+            self._dynas = dynamics
 
-        def observe(self, states:Sequence[Tuple[State,Action]] = None) -> Union[Sequence[float], float]:
-            return np.array([ s for s,a in states ]) @ self._theta
+        def __call__(self, states:Sequence[Tuple[State,Action]] = None) -> Sequence[float]:
+            return (torch.tensor([self._dynas.post_state(s,a) for s,a in states ]).float() @ self._theta).tolist()
 
     def __init__(self, n_ephochs:int=15) -> None:
         self._n_epochs = n_ephochs
-        self._skip_n   = 0
 
-    def learn_reward(self, dynamics: SimModel, expert_episodes: Sequence[Episode]) -> Reward: #type:ignore
+    def learn_reward(self, dynamics: SimModel, episodes: Sequence[Episode]) -> Reward: #type:ignore
 
-        r_t0s0a0_features = self._r_featurizer.to_features([(expert_episodes[0].states[0], expert_episodes[0].actions[0])])
-        q_t0s0a0_features = self._q_featurizer.to_features([(expert_episodes[0].states[0], expert_episodes[0].actions[0])])
+        expert_mu = self._feature_expect(episodes, dynamics)
+        theta     = [random.random() for _ in range(len(expert_mu))]
+        reward    = MaxCausalEnt.ThetaReward(theta, dynamics)
 
-        actions = dynamics.actions()
-        r_theta   = torch.rand ( (r_t0s0a0_features.shape[1],1)).double()
-        r_theta   = r_theta/r_theta.sum()
-        q_theta   = torch.rand (q_t0s0a0_features.shape[1]).double()
-        q_theta   = q_theta/q_theta.sum()
+        examples = [ (s0,a0,s1) for e in episodes for s0,a0,s1 in zip(e.states[0:],e.actions[0:],e.states[1:]) ]
 
-        thetas = []
-        dists  = []
+        for _ in range(self._n_epochs):
 
-        training_examples = []
+            epoch_pol = self._backward_pass(examples, dynamics, reward)
+            epoch_mu  = self._forward_pass(epoch_pol, dynamics)
 
-        for episode in expert_episodes:
-            for s0,a0,s1 in zip(episode.states[self._skip_n:],episode.actions[self._skip_n:],episode.states[self._skip_n+1:]):
-                training_examples.append((s0,a0,s1))
+            gradient = [e1-e2 for e1,e2 in zip(expert_mu,epoch_mu)]
+            theta    = [ t+g  for t,g   in zip(theta,gradient)    ]
+            reward   = MaxCausalEnt.ThetaReward(theta, dynamics)
 
-        mu_E = torch.tensor([self._feature_expectation(expert_episodes)])
+        return reward
 
-        for n in range(self._n_epochs):
+    def _backward_pass(self, examples:Sequence[Tuple[State,Action,State]], dynamics:SimModel, reward:Reward):
+        
+        Q = None
+ 
+        for _ in range(10):
+            X = []
+            Y = []
 
-                # q_theta   = torch.rand (q_t0s0a0_features.shape[1]).double()
-                # q_theta   = q_theta/q_theta.sum()
+            for example in examples:
+                X.append(dynamics.post_state(example[0], example[1]))
+                Y.append(reward([X[-1]])[0] + self._softmax(Q, example[2], dynamics.actions(example[2])))
 
-                epoch_examples  = training_examples
-                r_s0a0_features = self._r_featurizer.to_features([(s0,a0) for s0,a0,s1 in epoch_examples])
-                q_s0a0_features = self._q_featurizer.to_features([(s0,a0) for s0,a0,s1 in epoch_examples])
-                q_s1an_features = self._q_featurizer.to_features([(s1,a1) for s0,a0,s1 in epoch_examples for a1 in actions ])
+            Q = LinearRegression().fit(X,Y)
+        
+        return MaxCausalEnt.MaxEntPolicy(Q, dynamics)
 
-                Rs = r_s0a0_features @ r_theta
-                Q  = sklearn.linear_model.SGDRegressor(average=40, warm_start=True)
-                X  = q_s0a0_features.tolist()
+    def _forward_pass(self, policy, dynamics):        
+        return self._feature_expect([Episode.generate(dynamics, policy, 20) for _ in range(100)], dynamics)
 
-                random.shuffle(epoch_examples)
+    def _feature_expect(self, episodes: Sequence[Episode], dynamics: SimModel):
+        features = list(map(dynamics.post_state, *zip(*chain(*[zip(e.states,e.actions) for e in episodes]))))
+        return torch.tensor(features).float().mean(axis=0).tolist()
 
-                #V1 -- not great
-
-                # for z in range(9):
-
-                #     for i in range(len(epoch_examples)):
-                #         q_s0a0_feature = q_s0a0_features[i,:]
-                #         q_grad = torch.zeros(len(q_theta))
-                #         q_estm = 0
-
-                #         for j in range(len(actions)):
-                #             q_s1aj_feature = q_s1an_features[i*len(actions)+j,:]
-                #             q_grad += torch.exp((q_s1aj_feature-q_s0a0_feature)@q_theta)*(q_s1aj_feature-q_s0a0_feature)
-                #             q_estm += torch.exp((q_s1aj_feature-q_s0a0_feature)@q_theta)
-
-                #         q_theta = q_theta - 1/len(epoch_examples) * (q_estm-torch.exp(-Rs[i])) * q_grad
-
-                #V2
-
-                for i in range(50):
-
-                    q_grad      = 0
-                    L           = 0
-                    q_theta_bar = q_theta
-
-                    example_indexes = list(range(len(epoch_examples)))
-                    random.shuffle(example_indexes)
-                    example_indexes = example_indexes[:100]
-
-                    for j in example_indexes:
-
-                        dQ0_dw = q_s0a0_features[j,:]
-
-                        r0  = (r_s0a0_features[j,:]@r_theta).item()
-                        Q0  =  q_s0a0_features[j,:]@q_theta
-                        Q1s =  q_s1an_features[j*len(actions):(j+1)*len(actions),:]@q_theta
-
-                        dZ_du = self._soft_arg_max(Q1s)
-                        du_dw = q_s1an_features[j*len(actions):(j+1)*len(actions),:]
-
-                        ## e = Q0 - self._soft_max(Q1s) - r0
-                        ## L = e**2
-
-                        e     = Q0 - (r0 + .9*self._soft_max(Q1s).item())
-                        dL_de = e
-                        de_dw = dQ0_dw - .9*dZ_du@du_dw
-                        dL_dw = dL_de*de_dw
-
-                        L += abs(e)#**2
-                        #q_theta = q_theta - 1/len(example_indexes) * dL_dw
-                        #q_theta = q_theta*torch.exp(-1/len(example_indexes)*dL_dw)
-                        q_grad += dL_dw
-                    
-                    #print(f"L: {round(L.item()/len(example_indexes),3)}")
-                    q_theta = q_theta*torch.exp(-1/len(example_indexes)*q_grad)
-                    #q_theta = q_theta - 1/len(example_indexes) * q_grad
-
-
-                print(f"L{n}: {round(L.item()/len(example_indexes),3)}")
-
-                #V3
-
-                # for i in range(1500):
-
-                #     q_grad      = 0
-                #     L           = 0
-                #     q_theta_bar = q_theta
-
-                #     example_indexes = list(range(len(epoch_examples)))
-                #     random.shuffle(example_indexes)
-                #     example_indexes = example_indexes[:50]
-
-                #     for j in example_indexes:
-
-                #         dQ0_dw = q_s0a0_features[j,:]
-
-                #         r0  = (r_s0a0_features[j,:]@r_theta).item()
-                #         Q0  =  q_s0a0_features[j,:]@q_theta
-                #         Q1s =  q_s1an_features[j*len(actions):(j+1)*len(actions),:]@q_theta_bar
-
-                #         dZ_du = self._soft_arg_max(Q1s)
-                #         du_dw = q_s1an_features[j*len(actions):(j+1)*len(actions),:]
-
-                #         ## e = Q0 - self._soft_max(Q1s) - r0
-                #         ## L = e**2
-
-                #         e     = Q0 - (r0 + .9*self._soft_max(Q1s).item())
-                #         dL_de = e
-                #         de_dw = dQ0_dw #- .9*dZ_du@du_dw
-                #         dL_dw = dL_de*de_dw
-
-                #         L += abs(e)#**2
-                #         q_theta = q_theta - 1/len(example_indexes) * dL_dw
-                #         #q_theta = q_theta*torch.exp(-1/len(example_indexes)*dL_dw)
-                #         #q_grad += dL_dw
-                    
-                #     #print(f"L: {round(L.item()/len(example_indexes),3)}")
-                #     #q_theta = q_theta*torch.exp(-1/len(example_indexes)*q_grad)
-                #     #q_theta = q_theta - 1/len(example_indexes) * q_grad
-
-                # print(f"L{n}: {round(L.item()/len(example_indexes),3)}")
-
-                #V4 -- pretty good
-
-                # for i in range(45):
-
-                #     if i==0:
-                #         Qs = Rs
-                #     else:
-                #         Qs = Rs + self._soft_max(Q.predict(q_s1an_features).reshape((len(epoch_examples), len(actions))))
-                    
-                #     Q.fit(X, Qs.squeeze().tolist())
-
-                #policy_Q        = lambda sa: Q.predict(self._q_featurizer.to_features(sa))
-                policy_Q        = lambda sa: self._q_featurizer.to_features(sa)@q_theta
-                policy_A        = dynamics.actions()
-                policy          = MaxCausalEnt.ApproximatePolicy(policy_A, policy_Q)
-                policy_episodes = [ dynamics.make_episode(policy, 20) for _ in range(100)]
-
-                t = n+1
-                l = 1
-
-                #standard stochastic approximation
-                mu_P     = torch.tensor([self._feature_expectation(policy_episodes)])
-                gradient = (mu_E-mu_P).T
-                r_theta  = r_theta + (l/t)*gradient
-                #theta    = theta*torch.exp((l/t)*gradient)
-
-                #exponential gradient approximation
-                # for policy_episode in policy_episodes:
-                #    mu_P     = torch.tensor([self._feature_expectation([policy_episode])])
-                #    gradient = (mu_E-mu_P).T
-                #    theta    = theta*torch.exp((l/t)*gradient)
-                #    t+=1
-
-                total_grad = (mu_E-torch.tensor([self._feature_expectation(policy_episodes)]))
-
-                thetas.append(r_theta.squeeze().tolist())
-                dists.append(float(total_grad.norm()))
-
-                print( f"R: {round(float(total_grad.norm()),5):6.10f}")
-
-                if total_grad.norm() < 0.25:
-                    break
-
-        best_theta = thetas[dists.index(min(dists))]
-
-        print( f"{round(min(dists),5):6.10f}")
-
-        return MaxCausalEnt.ThetaReward(thetas[-1], self._r_featurizer), thetas[-1], self._feature_expectation(expert_episodes)
-
-    def _feature_expectation(self, expert_episodes):
-
-        expert_feature_sum = None
-        expert_state_count = None
-
-        for episode in expert_episodes:
-
-            if len(episode.states) <= self._skip_n or len(episode.actions) <= self._skip_n: continue
-
-            featureized_states = self._r_featurizer.to_features(list(zip(episode.states[self._skip_n:], episode.actions[self._skip_n:])))
-
-            if expert_feature_sum is None:
-                expert_state_count = len(featureized_states)
-                expert_feature_sum = featureized_states.sum(dim=0)
-            else:
-                expert_state_count += len(featureized_states)
-                expert_feature_sum += featureized_states.sum(dim=0)
-
-        return (expert_feature_sum / expert_state_count).tolist()
-
-    def _soft_max(self, xs: np.ndarray) -> float:
-        xs = np.array(xs)
-
-        if len(xs.shape) == 1:
-            xs = np.expand_dims(xs,axis=0)
-
-        max_xs = xs.max(1)[:,np.newaxis]
-        return max_xs + np.log(np.exp(xs-max_xs).sum(1))[:,np.newaxis]
-
-    def _soft_arg_max(self, xs: np.ndarray) -> np.ndarray:
-        xs = torch.exp(xs-max(xs))
-        return torch.exp(xs) / torch.exp(xs).sum()
+    def _softmax(self, Q: Regressor, state, actions) -> float:
+        #aka this is the log_sum_exp or real_soft_max and not the common definition of softmax
+        
+        if Q is None: 
+            return 0
+        else:
+            xs = Q.predict(list(zip(repeat(state), actions)))
+            return max(xs) + np.log(sum(np.exp(xs-max(xs))))

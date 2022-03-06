@@ -102,7 +102,7 @@ class CascadedSupervised_Tests(unittest.TestCase):
         self.assertEqual(learned_policy(1, [0,1]), optimal_policy(1, [0,1]))
         self.assertEqual(learned_policy(2, [0,1]), optimal_policy(2, [0,1]))
 
-class MaxCausalEntApprximation_Tests(unittest.TestCase):
+class MaxCausalEnt_Tests(unittest.TestCase):
 
     def test_simple_model1(self):
         dynamics    = SimpleDynamics([[[0,.5,.5],[.5,0,.5],[.5,.5,0]],[[1,0,0],[0,1,0],[0,0,1]]]) 
