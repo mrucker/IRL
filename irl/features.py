@@ -10,5 +10,12 @@ class Featurizer(ABC):
 class PostStateFeatures:
     def __init__(self, model: SimModel) -> None:
         self._model = model
-    def fit_transform(self, X: Sequence[Tuple[State,Action]], y = None) -> Sequence[State]:
+    
+    def fit(self, X: Sequence[Tuple[State,Action]], y = None):
+        return self
+
+    def transform(self, X: Sequence[Tuple[State,Action]], y = None) -> Sequence[State]:
         return list(map(self._model.post_state, *zip(*X)))
+
+    def fit_transform(self, X: Sequence[Tuple[State,Action]], y = None) -> Sequence[State]:
+        return self.transform(X)

@@ -38,15 +38,15 @@ class ValueIterations_Tests(unittest.TestCase):
         mass = [[[0,.5,.5],[.5,0,.5],[.5,.5,0]],[[1,0,0],[0,1,0],[0,0,1]]]
         Q    = ValueIteration(1,0,1,"Q").learn_policy(SimpleDynamics(mass),TestReward2())
 
-        self.assertEqual([0.0,0.0], Q(0,[0,1]))
-        self.assertEqual([0.5,0.5], Q(1,[0,1]))
-        self.assertEqual([1.0,1.0], Q(2,[0,1]))
+        self.assertEqual([0.0,0.0], Q([(0,0),(0,1)]))
+        self.assertEqual([0.5,0.5], Q([(1,0),(1,1)]))
+        self.assertEqual([1.0,1.0], Q([(2,0),(2,1)]))
 
         Q = ValueIteration(1,0,2,"Q").learn_policy(SimpleDynamics(mass),TestReward2())
 
-        self.assertEqual([0.75,0.00], Q(0,[0,1]))
-        self.assertEqual([1.00,1.00], Q(1,[0,1]))
-        self.assertEqual([1.25,2.00], Q(2,[0,1]))
+        self.assertEqual([0.75,0.00], Q([(0,0),(0,1)]))
+        self.assertEqual([1.00,1.00], Q([(1,0),(1,1)]))
+        self.assertEqual([1.25,2.00], Q([(2,0),(2,1)]))
 
     def test_epsilon_policy(self):
         mass   = [[[0,.5,.5],[.5,0,.5],[.5,.5,0]],[[1,0,0],[0,1,0],[0,0,1]]]
@@ -71,6 +71,7 @@ class KernelProjection_Tests(unittest.TestCase):
     def test_simple_model1(self):
         dynamics       = SimpleDynamics([[[0,.5,.5],[.5,0,.5],[.5,.5,0]],[[1,0,0],[0,1,0],[0,0,1]]])
         true_reward    = TestReward2()
+        
         reward_kernel  = GaussianKernel(.001)
         
         policy_learner = ValueIteration(0.9,0.01)
@@ -78,6 +79,7 @@ class KernelProjection_Tests(unittest.TestCase):
 
         optimal_policy  = policy_learner.learn_policy(dynamics,true_reward)
         expert_episodes = [ Episode.generate(dynamics, optimal_policy, 10) for _ in range(30) ]
+        
         learned_reward  = reward_learner.learn_reward(dynamics, expert_episodes)
         learned_policy  = policy_learner.learn_policy(dynamics, learned_reward)
 
@@ -99,9 +101,9 @@ class CascadedSupervised_Tests(unittest.TestCase):
         learned_reward  = reward_learner.learn_reward(dynamics, expert_episodes)
         learned_policy  = policy_learner.learn_policy(dynamics, learned_reward)
 
-        self.assertEqual(learned_policy(0, [0,1]), optimal_policy(0, [0,1]))
-        self.assertEqual(learned_policy(1, [0,1]), optimal_policy(1, [0,1]))
-        self.assertEqual(learned_policy(2, [0,1]), optimal_policy(2, [0,1]))
+        self.assertEqual(learned_policy(0, [0,1,2]), optimal_policy(0, [0,1,2]))
+        self.assertEqual(learned_policy(1, [0,1,2]), optimal_policy(1, [0,1,2],))
+        self.assertEqual(learned_policy(2, [0,1,2]), optimal_policy(2, [0,1,2]))
 
 class MaxCausalEnt_Tests(unittest.TestCase):
 
@@ -113,7 +115,7 @@ class MaxCausalEnt_Tests(unittest.TestCase):
         reward_learner = MaxCausalEnt()
 
         optimal_policy  = policy_learner.learn_policy(dynamics,true_reward)
-        expert_episodes = [ Episode.generate(dynamics, optimal_policy, 3) for _ in range(50) ]
+        expert_episodes = [ Episode.generate(dynamics, optimal_policy, 3) for _ in range(10) ]
         learned_reward  = reward_learner.learn_reward(dynamics, expert_episodes)
         learned_policy  = policy_learner.learn_policy(dynamics, learned_reward)
 

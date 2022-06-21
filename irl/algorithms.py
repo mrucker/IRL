@@ -12,11 +12,14 @@ import torch
 
 from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.env_util import make_vec_env
+
 from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
 
 from irl.models import State, Action, Policy, Reward, MassModel, SimModel, Episode
 from irl.kernels import Kernel, KernelVector
 from irl.gym import GymModel, GymEnvironment
+from irl.features import PostStateFeatures
 
 class PolicyLearner(ABC):
     
@@ -89,7 +92,7 @@ class ValueIteration(PolicyLearner):
         if self._mode == "policy":
             return lambda state, actions, Q=Q: actions[int(torch.argmax(Q[actions,state,:]))]
         else:
-            return lambda state, actions, Q=Q: [ Q[a,state,0] for a in actions ]
+            return lambda state_actions, Q=Q: [ Q[a,s,0] for s,a in state_actions ]
 
 class DirectEstimateIteration(PolicyLearner):
 
@@ -491,13 +494,17 @@ class MaxCausalEnt(RewardLearner):
 
     class MaxEntPolicy(Policy):
 
-        def __init__(self, Q: Regressor, dynamics: SimModel):
+        def __init__(self, Q: Regressor):
             self._Q = Q
-            self._D = dynamics
 
         def __call__(self, state, actions) -> Action:
-            qs = self._Q.predict([self._D.post_state(state,action) for action in actions])
-            return random.choices(actions, weights=np.exp(qs-sum(qs)))[0]
+
+            qs = self._Q.predict([(state,action) for action in actions])
+            qs = [ q-max(qs) for q in qs ] #this prevents overflow
+
+            e_qs = np.exp(qs)
+
+            return random.choices(actions, weights=e_qs/sum(e_qs))[0]
 
     class ThetaReward(Reward):
 
@@ -517,37 +524,67 @@ class MaxCausalEnt(RewardLearner):
         theta     = [random.random() for _ in range(len(expert_mu))]
         reward    = MaxCausalEnt.ThetaReward(theta, dynamics)
 
-        examples = [ (s0,a0,s1) for e in episodes for s0,a0,s1 in zip(e.states[0:],e.actions[0:],e.states[1:]) ]
+        examples = set([ s0 for e in episodes for s0 in e.states[:len(e.actions)] ])
 
-        for _ in range(self._n_epochs):
+        for _ in range(1,self._n_epochs+1):
 
+            #start = time.time()
             epoch_pol = self._backward_pass(examples, dynamics, reward)
-            epoch_mu  = self._forward_pass(epoch_pol, dynamics)
+            #print(f'backward : {round(time.time()-start,2)}')
+            
+            #start = time.time()
+            epoch_mu  = self._forward_pass(episodes, epoch_pol, dynamics)
+            #print(f'forward : {round(time.time()-start,2)}')
 
-            gradient = [e1-e2 for e1,e2 in zip(expert_mu,epoch_mu)]
-            theta    = [ t+g  for t,g   in zip(theta,gradient)    ]
+            gradient = [e1-e2 for e1,e2 in zip(expert_mu,epoch_mu)   ]
+            theta    = [ t+(g) for t,g in zip(theta,gradient) ]
             reward   = MaxCausalEnt.ThetaReward(theta, dynamics)
+
+            #g_size = round(math.sqrt(sum([g**2 for g in gradient])),3) 
+            #print(g_size)
+            #print(theta)
 
         return reward
 
     def _backward_pass(self, examples:Sequence[Tuple[State,Action,State]], dynamics:SimModel, reward:Reward):
-        
+
+        S0 = set(examples)
+
         Q = None
  
-        for _ in range(10):
+        for _ in range(5):
             X = []
             Y = []
 
-            for example in examples:
-                X.append(dynamics.post_state(example[0], example[1]))
-                Y.append(reward([X[-1]])[0] + self._softmax(Q, example[2], dynamics.actions(example[2])))
+            for s0,a0 in [(s,a) for s in S0 for a in dynamics.actions(s)]:
 
-            Q = LinearRegression().fit(X,Y)
-        
-        return MaxCausalEnt.MaxEntPolicy(Q, dynamics)
+                s1 = dynamics.next_state(s0,a0)
+                r0 = reward([(s0,a0)])[0]
+                q1 = 0 if dynamics.is_terminal(s0) else self._softmax(Q, s1, dynamics.actions(s1))
 
-    def _forward_pass(self, policy, dynamics):        
-        return self._feature_expect([Episode.generate(dynamics, policy, 20) for _ in range(100)], dynamics)
+                X.append((s0, a0))
+                Y.append(r0 + q1)
+
+            Q = make_pipeline(PostStateFeatures(dynamics), LinearRegression()).fit(X,Y)
+            #Q = make_pipeline(PostStateFeatures(dynamics), KernelRidge(kernel='rbf',gamma=10)).fit(X,Y)
+
+        return MaxCausalEnt.MaxEntPolicy(Q)
+
+    def _forward_pass(self, expert_episodes: Sequence[Episode], policy: Policy, dynamics: SimModel):        
+        policy_episodes = []
+
+        for _ in range(10):
+            for expert_episode in expert_episodes:
+                states  = [expert_episode.states[0]]
+                actions = []
+                
+                for _ in range(len(expert_episode.actions)):
+                    actions.append(policy(states[-1], dynamics.actions(states[-1])))
+                    states.append(dynamics.next_state(states[-1], actions[-1]))
+
+                policy_episodes.append(Episode(states[:len(expert_episode.states)],actions))
+
+        return self._feature_expect(policy_episodes, dynamics)
 
     def _feature_expect(self, episodes: Sequence[Episode], dynamics: SimModel):
         features = list(map(dynamics.post_state, *zip(*chain(*[zip(e.states,e.actions) for e in episodes]))))
@@ -555,9 +592,9 @@ class MaxCausalEnt(RewardLearner):
 
     def _softmax(self, Q: Regressor, state, actions) -> float:
         #aka this is the log_sum_exp or real_soft_max and not the common definition of softmax
-        
+
         if Q is None: 
             return 0
         else:
-            xs = Q.predict(list(zip(repeat(state), actions)))
+            xs = Q.predict([ (state,action) for action in actions])
             return max(xs) + np.log(sum(np.exp(xs-max(xs))))

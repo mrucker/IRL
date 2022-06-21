@@ -5,14 +5,11 @@ channels:
 dependencies:
     - python=3.8.*
     - pip=21.0.*
-    - pytorch=1.7.1
+    - pytorch=1.10.2
     - cpuonly
     - pip:
         - numpy
         - pandas
         - matplotlib
         - sklearn
-        - ffmpeg
         - stable-baselines3
-        - Box2D
-        - .
