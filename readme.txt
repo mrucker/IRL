@@ -6,4 +6,6 @@ Implementations of application specific features, kernels, and models can be fou
 
 Unit tests for all algorithms can be found in IRL/tests.
 
-Dependencies can be installed to the `irl` conda environment via `conda env create --f environment.yml`. Afterwards use `conda activate irl` to switch to this environment.
+Dependencies can be installed to the `irl` conda environment via `conda env create --f environment.yml`. 
+
+After installing dependencies use `conda activate irl` to switch to this environment.
