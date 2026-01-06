@@ -1,7 +1,9 @@
-The Python code directory contains a number of IRL and RL algorithms and experiments.
-
-Core, reusable functionality such as algorithms and visualizations are implemented in the combat directory.
+Core, reusable functionality such as algorithms and visualizations can be found in the IRL directory.
 
 One off experiments and visualizations which utilize the core code can be found in the scripts directory.
 
-To make sure all required dependencies have been installed use conda and run `conda env create --f environment.yml` to create and install all package dependencies to an environment called `irl`. Once this is finished use `conda activate irl` to switch to this environment before running any desired files in ~/scripts/<domains>/*.py.
+Implementations of application specific features, kernels, and models can be found in IRL/domains.
+
+Unit tests for all algorithms can be found in IRL/tests.
+
+Dependencies can be installed to the `irl` conda environment via `conda env create --f environment.yml`. Afterwards use `conda activate irl` to switch to this environment.
